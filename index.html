@@ -169,9 +169,56 @@
   .chip.done { text-decoration: line-through; opacity:.5; }
 
   canvas#confetti { position: fixed; inset:0; pointer-events:none; z-index: 50; }
+
+  /* ---- dramatic effects ---- */
+  .wheel-box { transition: transform .4s cubic-bezier(.2,.8,.2,1), filter .3s; }
+  .wheel-box.dim { filter: brightness(.4) saturate(.7); }
+  .wheel-box.reveal { transform: scale(1.07); }
+  .pointer { transition: transform .08s; }
+  .pointer.kick { transform: translateX(-50%) translateY(-3px) rotate(-8deg); }
+
+  /* spotlight vignette around the wheel on reveal */
+  #vignette {
+    position:absolute; inset:-40px; pointer-events:none; z-index:3; opacity:0;
+    transition: opacity .4s; border-radius:50%;
+    background: radial-gradient(circle at 50% 50%, transparent 38%, rgba(5,7,20,.82) 72%);
+  }
+  #vignette.on { opacity:1; }
+
+  /* 3·2·1 countdown overlay over the wheel */
+  #countdown {
+    position:absolute; inset:0; z-index:6; display:none;
+    align-items:center; justify-content:center; pointer-events:none;
+    font-size:120px; font-weight:900; color:#fff;
+    text-shadow:0 0 24px var(--accent), 0 0 60px var(--accent-2);
+  }
+  @keyframes cd { 0%{ transform:scale(.3); opacity:0; } 25%{ transform:scale(1.1); opacity:1; } 75%{ transform:scale(1); opacity:1; } 100%{ transform:scale(1.6); opacity:0; } }
+
+  /* full-screen white flash on win */
+  #flash { position:fixed; inset:0; z-index:60; pointer-events:none; background:#fff; opacity:0; }
+  @keyframes flash { 0%{ opacity:.85; } 100%{ opacity:0; } }
+
+  /* winner name pop */
+  .result-banner .big { animation: namepop .55s cubic-bezier(.2,1.4,.3,1); }
+  @keyframes namepop {
+    0%{ transform:scale(.5); opacity:0; filter:blur(6px); }
+    60%{ transform:scale(1.18); opacity:1; filter:blur(0); }
+    100%{ transform:scale(1); }
+  }
+
+  /* mute toggle */
+  #muteBtn {
+    position:fixed; top:14px; right:14px; z-index:70;
+    width:44px; height:44px; border-radius:50%; cursor:pointer;
+    border:1px solid var(--border); background:#1a1f3c; color:var(--text);
+    font-size:18px; display:flex; align-items:center; justify-content:center;
+    box-shadow:0 2px 10px rgba(0,0,0,.4);
+  }
+  #muteBtn:hover { border-color: var(--accent); }
 </style>
 </head>
 <body>
+<button id="muteBtn" title="소리 켜기/끄기">🔊</button>
 <header>
   <h1>🎁 오늘부터 캔바</h1>
   <p>🎉 오늘의 행운의 주인공은 누구?</p>
@@ -212,9 +259,11 @@
     <h2>추첨 결과</h2>
     <div class="stage">
       <div id="wheelStage" class="wheel-box">
+        <div id="vignette"></div>
         <div class="pointer"></div>
         <canvas id="wheel" width="420" height="420"></canvas>
         <div class="center-cap">🎁</div>
+        <div id="countdown"></div>
       </div>
       <div class="result-banner" id="banner">
         <div class="small">두구두구… 추첨을 시작하세요!</div>
@@ -225,6 +274,7 @@
 </div>
 
 <canvas id="confetti"></canvas>
+<div id="flash"></div>
 
 <script>
 (() => {
@@ -238,6 +288,11 @@
   const targetWrap = $('#targetWrap');
   const poolChips = $('#poolChips');
   const wheelStage = $('#wheelStage');
+  const pointerEl = $('.pointer');
+  const vignette = $('#vignette');
+  const countdownEl = $('#countdown');
+  const flashEl = $('#flash');
+  const muteBtn = $('#muteBtn');
 
   const canvas = $('#wheel');
   const ctx = canvas.getContext('2d');
@@ -293,7 +348,8 @@
   }
 
   // ---------- Wheel drawing ----------
-  function drawWheel(items, rot) {
+  // hi (optional): index of the winning slice — spotlight it, dim the rest
+  function drawWheel(items, rot, hi) {
     ctx.clearRect(0, 0, SIZE, SIZE);
     const n = items.length;
     ctx.save();
@@ -317,12 +373,20 @@
       ctx.moveTo(0, 0);
       ctx.arc(0, 0, R - 4, start, start + slice);
       ctx.closePath();
+      const dim = (hi != null && i !== hi);
+      ctx.globalAlpha = dim ? 0.22 : 1;
       ctx.fillStyle = PALETTE[i % PALETTE.length];
       ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,.25)'; ctx.lineWidth = 1; ctx.stroke();
+      if (hi != null && i === hi) {
+        ctx.shadowColor = '#fff'; ctx.shadowBlur = 30; ctx.fill(); ctx.shadowBlur = 0;
+      }
+      ctx.strokeStyle = (hi != null && i === hi) ? '#fff' : 'rgba(0,0,0,.25)';
+      ctx.lineWidth = (hi != null && i === hi) ? 3 : 1; ctx.stroke();
+      ctx.globalAlpha = 1;
 
       // label
       ctx.save();
+      ctx.globalAlpha = dim ? 0.3 : 1;
       ctx.rotate(start + slice / 2);
       ctx.textAlign = 'right';
       ctx.fillStyle = '#1a1230';
@@ -372,45 +436,61 @@
   function spinSingle() {
     const pool = activePool();
     const items = pool.map(o => o.label);
-    if (items.length === 0) { flash('🎉 모든 추첨이 끝났어요!'); return; }
+    if (items.length === 0) { spinning = false; spinBtn.disabled = false; flash('🎉 모든 추첨이 끝났어요!'); return; }
     if (items.length === 1) { finishSingle(pool, 0); return; }
 
     spinning = true; spinBtn.disabled = true;
     const winIdx = Math.floor(Math.random() * items.length);
     const slice = (Math.PI * 2) / items.length;
-    // we want slice center to land under top pointer
     const targetCenter = winIdx * slice + slice / 2;
     const desired = -Math.PI / 2 - targetCenter; // rot so that center under pointer
     const turns = 5 + Math.floor(Math.random() * 3);
     const finalAngle = desired - turns * Math.PI * 2; // spin backwards (visual)
     const startAngle = angle % (Math.PI * 2);
     const total = finalAngle - startAngle - Math.PI * 4; // ensure enough spin
-    const dur = 4200;
+    const dir = total < 0 ? -1 : 1;
+    const overshoot = Math.min(slice * 0.55, 0.8); // late near-miss, in radians
+    const dur = 4900;
     const t0 = performance.now();
+    let lastSlice = -1;
+    startDrone();
 
     function frame(now) {
       const p = Math.min(1, (now - t0) / dur);
-      const ease = 1 - Math.pow(1 - p, 3); // easeOutCubic
-      angle = startAngle + total * ease;
+      // dramatic decel + near-miss bump that settles back to exactly `total` at p=1
+      angle = startAngle + total * easeOutQuart(p) + dir * overshoot * nearMissBump(p);
       drawWheel(items, angle);
+      const si = winnerIndex(items, angle);
+      if (si !== lastSlice) { lastSlice = si; playTick(p); kickPointer(); }
       if (p < 1) requestAnimationFrame(frame);
-      else {
-        const idx = winnerIndex(items, angle);
-        finishSingle(pool, idx);
-      }
+      else { stopDrone(); finishSingle(pool, winnerIndex(items, angle)); }
     }
     requestAnimationFrame(frame);
   }
 
   function finishSingle(pool, idx) {
+    const items = pool.map(o => o.label);
     const winner = pool[idx].label;
-    drawn.push(pool[idx].idx);
-    spinning = false; spinBtn.disabled = false;
     const kind = target === 'people' ? '🎉 축하합니다! 당첨자' : '🎁 당첨 경품';
+
+    // reveal sequence: spotlight + flash + name pop + fanfare + confetti
+    drawWheel(items, angle, idx);
+    wheelStage.classList.add('reveal');
+    vignette.classList.add('on');
+    flashScreen();
     banner.innerHTML = `<div class="small">${kind}</div><div class="big">${escapeHtml(winner)}</div>`;
-    addResultRow(winner);
+    playFanfare();
+    if ('vibrate' in navigator) navigator.vibrate([40, 30, 120]);
     confettiBurst();
-    refresh();
+
+    // commit after holding the spotlight for a beat
+    setTimeout(() => {
+      drawn.push(pool[idx].idx);
+      addResultRow(winner);
+      spinning = false; spinBtn.disabled = false;
+      clearReveal();
+      refresh();
+    }, 1400);
   }
 
   function addResultRow(winner) {
@@ -430,27 +510,106 @@
   function spinMatch() {
     const ppl = lines(peopleEl);
     const prz = lines(prizesEl);
-    if (ppl.length === 0 || prz.length === 0) { flash('참가자와 경품을 입력해 주세요'); return; }
+    if (ppl.length === 0 || prz.length === 0) { spinning = false; spinBtn.disabled = false; flash('참가자와 경품을 입력해 주세요'); return; }
 
     spinning = true; spinBtn.disabled = true;
-    // quick visual spin then reveal
-    const shown = ppl;
+    const shown = orderedPeople();
     const t0 = performance.now();
-    const dur = 2600;
+    const dur = 2800;
     const startAngle = angle;
     const total = -(6 * Math.PI * 2);
+    let lastSlice = -1;
+    startDrone();
     function frame(now){
       const p = Math.min(1,(now-t0)/dur);
-      const ease = 1 - Math.pow(1-p,3);
-      angle = startAngle + total * ease;
+      angle = startAngle + total * easeOutQuart(p);
       drawWheel(shown, angle);
+      const si = winnerIndex(shown, angle);
+      if (si !== lastSlice) { lastSlice = si; playTick(p); kickPointer(); }
       if (p<1) requestAnimationFrame(frame);
-      else revealMatch(ppl, prz);
+      else { stopDrone(); revealMatch(ppl, prz); }
     }
     requestAnimationFrame(frame);
   }
 
   function shuffle(a){const x=a.slice();for(let i=x.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[x[i],x[j]]=[x[j],x[i]];}return x;}
+
+  // ---------- audio (WebAudio, synthesized — no files) ----------
+  let audioCtx = null, muted = false, drone = null;
+  function ensureAudio(){
+    if (!audioCtx) { try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){ return; } }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }
+  function blip(freq, dur, type, vol, when){
+    if (!audioCtx || muted) return;
+    const t = audioCtx.currentTime + (when || 0);
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = type || 'square'; o.frequency.value = freq;
+    o.connect(g); g.connect(audioCtx.destination);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(vol || 0.2, t + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.start(t); o.stop(t + dur + 0.02);
+  }
+  function playTick(p){ blip(1050 + (p || 0) * 350, 0.03, 'square', 0.1); }
+  function playCountBeep(go){ blip(go ? 880 : 440, go ? 0.28 : 0.12, go ? 'triangle' : 'sine', 0.25); }
+  function playFanfare(){
+    [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => blip(f, 0.32, 'triangle', 0.2, i * 0.12));
+  }
+  function startDrone(){
+    if (!audioCtx || muted) return;
+    stopDrone();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain(), lp = audioCtx.createBiquadFilter();
+    o.type = 'sawtooth'; o.frequency.value = 58;
+    lp.type = 'lowpass'; lp.frequency.value = 180;
+    o.connect(lp); lp.connect(g); g.connect(audioCtx.destination);
+    g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    g.gain.linearRampToValueAtTime(0.05, audioCtx.currentTime + 0.4);
+    o.start();
+    drone = { o, g };
+  }
+  function stopDrone(){
+    if (!drone || !audioCtx) { drone = null; return; }
+    const t = audioCtx.currentTime;
+    try {
+      drone.g.gain.cancelScheduledValues(t);
+      drone.g.gain.setValueAtTime(drone.g.gain.value, t);
+      drone.g.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+      drone.o.stop(t + 0.25);
+    } catch(e){}
+    drone = null;
+  }
+  muteBtn.addEventListener('click', () => {
+    muted = !muted;
+    muteBtn.textContent = muted ? '🔇' : '🔊';
+    if (muted) stopDrone();
+  });
+
+  // ---------- reveal / countdown effects ----------
+  function clearReveal(){ wheelStage.classList.remove('reveal'); vignette.classList.remove('on'); }
+  function flashScreen(){ flashEl.style.animation = 'none'; void flashEl.offsetWidth; flashEl.style.animation = 'flash .5s ease'; }
+  function kickPointer(){ pointerEl.classList.add('kick'); setTimeout(() => pointerEl.classList.remove('kick'), 90); }
+  function countdown(cb){
+    const steps = ['3', '2', '1', '🎉'];
+    wheelStage.classList.add('dim');
+    countdownEl.style.display = 'flex';
+    let i = 0;
+    (function step(){
+      if (i < steps.length){
+        countdownEl.textContent = steps[i];
+        countdownEl.style.animation = 'none'; void countdownEl.offsetWidth; countdownEl.style.animation = 'cd .5s ease';
+        playCountBeep(i === steps.length - 1);
+        i++; setTimeout(step, 470);
+      } else {
+        countdownEl.style.display = 'none';
+        wheelStage.classList.remove('dim');
+        cb();
+      }
+    })();
+  }
+  // easing: dramatic deceleration + late near-miss overshoot that settles back exactly on target
+  function easeOutQuart(p){ return 1 - Math.pow(1 - p, 4); }
+  function nearMissBump(p){ if (p < 0.7) return 0; const q = (p - 0.7) / 0.3; return Math.sin(Math.PI * q); }
 
   function revealMatch(ppl, prz) {
     spinning = false; spinBtn.disabled = false;
@@ -464,6 +623,9 @@
     pairs.sort((a, b) => (a.gift === '꽝' ? 1 : 0) - (b.gift === '꽝' ? 1 : 0));
     const winnerCount = pairs.filter(p => p.gift !== '꽝').length;
 
+    flashScreen();
+    playFanfare();
+    if ('vibrate' in navigator) navigator.vibrate([40, 30, 120]);
     banner.innerHTML = `<div class="small">🎉 추첨 완료</div><div class="big">${winnerCount}명 당첨!</div>`;
     resultsList.innerHTML = '<h3>🏆 당첨 결과</h3>';
     resultsList.dataset.init = '1';
@@ -495,8 +657,9 @@
     b.addEventListener('click', () => {
       document.querySelectorAll('.mode-btn').forEach(x => x.classList.remove('active'));
       b.classList.add('active');
+      if (spinning) return;
       mode = b.dataset.mode;
-      drawn = []; angle = 0; clearResults(); rebuildOrder();
+      drawn = []; angle = 0; clearResults(); clearReveal(); rebuildOrder();
       spinBtn.textContent = mode === 'single' ? '🎰 추첨 시작!' : '🎰 한 번에 매칭';
       banner.innerHTML = '<div class="small">두구두구… 추첨을 시작하세요!</div>';
       refresh();
@@ -507,8 +670,9 @@
     b.addEventListener('click', () => {
       document.querySelectorAll('.target button').forEach(x => x.classList.remove('active'));
       b.classList.add('active');
+      if (spinning) return;
       target = b.dataset.target;
-      drawn = []; angle = 0; clearResults(); rebuildOrder();
+      drawn = []; angle = 0; clearResults(); clearReveal(); rebuildOrder();
       banner.innerHTML = '<div class="small">두구두구… 추첨을 시작하세요!</div>';
       refresh();
     });
@@ -516,11 +680,21 @@
 
   spinBtn.addEventListener('click', () => {
     if (spinning) return;
-    if (mode === 'single') spinSingle(); else spinMatch();
+    ensureAudio();
+    // validate before the countdown so we don't build suspense for nothing
+    if (mode === 'single') {
+      if (activePool().length === 0) { flash('🎉 모든 추첨이 끝났어요!'); return; }
+    } else {
+      if (lines(peopleEl).length === 0 || lines(prizesEl).length === 0) { flash('참가자와 경품을 입력해 주세요'); return; }
+    }
+    spinning = true; spinBtn.disabled = true;
+    clearReveal();
+    countdown(() => { if (mode === 'single') spinSingle(); else spinMatch(); });
   });
 
   resetBtn.addEventListener('click', () => {
-    drawn = []; angle = 0; clearResults();
+    if (spinning) return;
+    drawn = []; angle = 0; clearResults(); clearReveal(); stopDrone();
     banner.innerHTML = '<div class="small">두구두구… 추첨을 시작하세요!</div>';
     refresh();
   });
@@ -541,12 +715,28 @@
   function sizeCC(){ cc.width = innerWidth; cc.height = innerHeight; }
   sizeCC(); addEventListener('resize', sizeCC);
   function confettiBurst(){
-    for (let i=0;i<120;i++){
+    // two side cannons firing inward + upward
+    const cannon = (sx, sy, dirx) => {
+      for (let i=0;i<70;i++){
+        const gold = i % 4 === 0;
+        parts.push({
+          x: sx, y: sy,
+          vx: dirx*(4+Math.random()*7), vy: -(11+Math.random()*9),
+          g: gold ? 0.18 : 0.32, c: gold ? '#ffd36e' : PALETTE[i%PALETTE.length],
+          r: 4+Math.random()*5, life: gold ? 150 : 80+Math.random()*40,
+          rot: Math.random()*6, alpha: 1, fade: gold
+        });
+      }
+    };
+    cannon(innerWidth*0.18, innerHeight, 1);
+    cannon(innerWidth*0.82, innerHeight, -1);
+    // a small center burst
+    for (let i=0;i<30;i++){
       parts.push({
         x: innerWidth/2, y: innerHeight/3,
-        vx:(Math.random()-0.5)*12, vy:(Math.random()-1)*12-4,
-        g:0.35, c: PALETTE[i%PALETTE.length], r: 4+Math.random()*5,
-        life: 80+Math.random()*40, rot: Math.random()*6
+        vx:(Math.random()-0.5)*11, vy:(Math.random()-1)*10-3,
+        g:0.3, c: PALETTE[i%PALETTE.length], r: 4+Math.random()*5,
+        life: 80+Math.random()*40, rot: Math.random()*6, alpha: 1
       });
     }
     if (!confettiBurst.running){ confettiBurst.running = true; requestAnimationFrame(tick); }
@@ -555,7 +745,9 @@
     cctx.clearRect(0,0,cc.width,cc.height);
     parts.forEach(p => {
       p.vy += p.g; p.x += p.vx; p.y += p.vy; p.life--; p.rot += 0.2;
-      cctx.save(); cctx.translate(p.x,p.y); cctx.rotate(p.rot);
+      if (p.fade) p.alpha = Math.max(0, p.life/90);
+      cctx.save(); cctx.globalAlpha = p.alpha == null ? 1 : p.alpha;
+      cctx.translate(p.x,p.y); cctx.rotate(p.rot);
       cctx.fillStyle = p.c; cctx.fillRect(-p.r/2,-p.r/2,p.r,p.r*0.6); cctx.restore();
     });
     parts = parts.filter(p => p.life>0 && p.y < cc.height+40);
