@@ -231,7 +231,7 @@
     <label>👤 참가자</label>
     <textarea id="people" placeholder="홍길동&#10;김영희&#10;이철수"></textarea>
     <label>🎁 경품</label>
-    <textarea id="prizes" placeholder="치킨 기프티콘&#10;스타벅스 쿠폰&#10;꽝"></textarea>
+    <textarea id="prizes" placeholder="치킨 기프티콘&#10;스타벅스 쿠폰&#10;다음 기회에"></textarea>
 
     <h2 style="margin-top:18px;">추첨 방식</h2>
     <div class="modes">
@@ -305,8 +305,9 @@
   let angle = 0;              // current wheel rotation (radians)
   let spinning = false;
   let order = [];             // shuffled display order (permutation of current wheel list indices)
+  const LOSE_LABEL = '다음 기회에';   // label used to pad when prizes < people (꽝 대체)
 
-  const PALETTE = ['#ff5d8f','#6c5ce7','#38d39f','#ffd36e','#4dabf7','#ff922b','#cc5de8','#22b8cf','#82c91e','#f06595'];
+  const PALETTE =['#ff5d8f','#6c5ce7','#38d39f','#ffd36e','#4dabf7','#ff922b','#cc5de8','#22b8cf','#82c91e','#f06595'];
 
   function lines(el) {
     return el.value.split('\n').map(s => s.trim()).filter(Boolean);
@@ -613,15 +614,15 @@
 
   function revealMatch(ppl, prz) {
     spinning = false; spinBtn.disabled = false;
-    // assign each person a prize. If fewer prizes, cycle/pad with '꽝'
+    // assign each person a prize. If fewer prizes, pad with the lose label
     let pool = shuffle(prz);
-    while (pool.length < ppl.length) pool.push('꽝');
+    while (pool.length < ppl.length) pool.push(LOSE_LABEL);
     pool = shuffle(pool).slice(0, ppl.length);
 
-    // pair people with prizes, then list actual winners (got a prize) before 꽝
+    // pair people with prizes, then list actual winners (got a prize) first
     const pairs = ppl.map((person, i) => ({ person, gift: pool[i] }));
-    pairs.sort((a, b) => (a.gift === '꽝' ? 1 : 0) - (b.gift === '꽝' ? 1 : 0));
-    const winnerCount = pairs.filter(p => p.gift !== '꽝').length;
+    pairs.sort((a, b) => (a.gift === LOSE_LABEL ? 1 : 0) - (b.gift === LOSE_LABEL ? 1 : 0));
+    const winnerCount = pairs.filter(p => p.gift !== LOSE_LABEL).length;
 
     flashScreen();
     playFanfare();
@@ -757,7 +758,7 @@
 
   // init demo
   peopleEl.value = '홍길동\n김영희\n이철수\n박민수';
-  prizesEl.value = '치킨 기프티콘\n스타벅스 쿠폰\n영화 예매권\n꽝';
+  prizesEl.value = '치킨 기프티콘\n스타벅스 쿠폰\n영화 예매권\n다음 기회에';
   rebuildOrder();
   refresh();
 })();
